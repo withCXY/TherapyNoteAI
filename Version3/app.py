@@ -6,6 +6,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from openai import OpenAI
 import gradio as gr
+import tempfile
+import PyPDF2
 
 # Ensure OpenAI API key is set
 # api_key = os.getenv("OPENAI_API_KEY")
@@ -37,13 +39,21 @@ i18n = {
         'new': '新对话', 'history': '历史记录',
         'doctor': '医生姓名', 'patient': '病人姓名', 'date': '日期',
         'audio': '录制/上传音频', 'file': '上传文件', 'submit': '提交',
-        'transcript': '转录文本', 'summary': '医用总结', 'download': '下载文档'
+        'transcript': '转录文本', 'summary': '医用总结', 'download': '下载文档',
+        'text_input': '📄 文本输入（上传后自动填入，也可手动修改）',
+        'md_preview': '📄 格式化总结（仅预览）',
+        'md_editor': '✏️ 编辑总结（可修改）'
+        
     },
     'English': {
         'new': 'New Conversation', 'history': 'History',
         'doctor': 'Doctor Name', 'patient': 'Patient Name', 'date': 'Date',
         'audio': 'Record/Upload Audio', 'file': 'Upload File', 'submit': 'Submit',
-        'transcript': 'Transcript', 'summary': 'Medical Summary', 'download': 'Download PDF'
+        'transcript': 'Transcript', 'summary': 'Medical Summary', 'download': 'Download PDF',
+        'text_input': '📄 Input Text (Auto-filled from upload, editable)',
+        'md_preview': '📄 Markdown Summary (Preview)',
+        'md_editor': '✏️ Edit Summary (Markdown)'
+
     }
 }
 
@@ -74,6 +84,20 @@ def summarize_and_extract(text, info):
         messages=[{"role": "user", "content": prompt}]
     )
     return resp.choices[0].message.content
+
+# File reading
+def handle_uploaded_file(file):
+    if file is None:
+        return ""
+    ext = os.path.splitext(file.name)[-1].lower()
+    if ext == ".txt":
+        with open(file.name, "r", encoding="utf-8") as f:
+            return f.read()
+    elif ext == ".pdf":
+        reader = PyPDF2.PdfReader(file.name)
+        return "\n".join([page.extract_text() or "" for page in reader.pages])
+    return "❌ Unsupported file format. Please upload PDF or TXT."
+
 
 # Generate downloadable PDF report
 def generate_report(info, transcript, summary, knowledge=[]):
@@ -111,18 +135,35 @@ def build_ui():
                 patient = gr.Textbox(label=i18n['中文']['patient'])
                 date = gr.Textbox(label=i18n['中文']['date'], value=str(datetime.today().date()))
                 audio = gr.Audio(label=i18n['中文']['audio'], type='filepath')
-                file_obj = gr.File(label=i18n['中文']['file'])
+                file_obj = gr.File(label=i18n['中文']['file'], 
+                    file_types=[".pdf", ".txt", ".docx"],
+                    interactive=True
+                )
+                text_input = gr.Textbox(label=i18n['中文']['text_input'], lines=10)
                 btn = gr.Button(value=i18n['中文']['submit'])
                 transcript_out = gr.Textbox(label=i18n['中文']['transcript'])
                 summary_out = gr.Textbox(label=i18n['中文']['summary'])
                 pdf_file = gr.File(label=i18n['中文']['download'], visible=False)
+                summary_md = gr.Markdown(label="📄 格式化总结（仅预览）", visible=False)
+                summary_editor = gr.Textbox(label="✏️ 编辑总结 (Markdown)", lines=10, visible=False, interactive=True)
+
+                file_obj.change(
+                    fn=handle_uploaded_file,
+                    inputs=file_obj,
+                    outputs=text_input
+                )
 
                 import tempfile
 
-                def new_conversation(lang_sel, doc_name, pat_name, date_str, audio_path, file_upload):
+                def new_conversation(lang_sel, doc_name, pat_name, date_str, audio_path, file_upload, manual_text):
+                    if manual_text.strip():
+                        transcript = manual_text
+                    else:
+                        transcript = transcribe_audio(audio_path, file_upload)
+                        
                     # Transcription and summary
                     info = f"Doctor: {doc_name}; Patient: {pat_name}; Date: {date_str}"
-                    transcript = transcribe_audio(audio_path, file_upload)
+                    # transcript = transcribe_audio(audio_path, file_upload)
                     summary = summarize_and_extract(transcript, info)
 
                     # Save to history
@@ -141,13 +182,20 @@ def build_ui():
                         tmp.write(pdf_buffer.read())
                         tmp_path = tmp.name
 
-                    return transcript, summary, gr.update(value=tmp_path, visible=True)
+                    return (
+                        transcript,
+                        summary,
+                        gr.update(value=tmp_path, visible=True),
+                        gr.update(value=summary, visible=True),   # 格式化 Markdown 展示
+                        gr.update(value=summary, visible=True)    # 文本框可编辑
+                    )
+
 
 
                 btn.click(
                     fn=new_conversation,
-                    inputs=[lang, doctor, patient, date, audio, file_obj],
-                    outputs=[transcript_out, summary_out, pdf_file]
+                    inputs=[lang, doctor, patient, date, audio, file_obj, text_input],
+                    outputs=[transcript_out, summary_out, pdf_file, summary_md, summary_editor]
                 )
 
             with gr.Tab(i18n['中文']['history']) as history_tab:
@@ -186,13 +234,17 @@ def build_ui():
                 gr.update(label=labels['transcript']),# transcript_out
                 gr.update(label=labels['summary']),  # summary_out
                 gr.update(label=labels['download']), # pdf_file
-                gr.update(value=labels['history'])   # hist_btn
+                gr.update(value=labels['history']),   # hist_btn
+                gr.update(label=labels['text_input']),
+                gr.update(label=labels['md_preview']),
+                gr.update(label=labels['md_editor'])
+
             ]
 
         lang.change(
             fn=update_labels,
             inputs=[lang],
-            outputs=[new_tab, history_tab, doctor, patient, date, audio, file_obj, btn, transcript_out, summary_out, pdf_file, hist_btn]
+            outputs=[new_tab, history_tab, doctor, patient, date, audio, file_obj, btn, transcript_out, summary_out, pdf_file, hist_btn, text_input, summary_md, summary_editor]
         )
         return demo
 
