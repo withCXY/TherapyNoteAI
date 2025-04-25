@@ -100,12 +100,12 @@ def handle_uploaded_file(file):
 
 
 # Generate downloadable PDF report
-def generate_report(info, transcript, summary, knowledge=[]):
+def generate_report(info, transcript, summary, session_id, knowledge=[]):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer)
     styles = getSampleStyleSheet()
     story = []
-    story.append(Paragraph(f"Patient Info: {info}", styles['Title']))
+    story.append(Paragraph(f"Session #{session_id} — Patient Info: {info}", styles['Title']))
     story.append(Spacer(1,12))
     story.append(Paragraph("Transcript:", styles['Heading2']))
     story.append(Paragraph(transcript.replace("\n","<br/>"), styles['BodyText']))
@@ -165,29 +165,37 @@ def build_ui():
                     info = f"Doctor: {doc_name}; Patient: {pat_name}; Date: {date_str}"
                     # transcript = transcribe_audio(audio_path, file_upload)
                     summary = summarize_and_extract(transcript, info)
+                    
+                    c.execute("SELECT MAX(id) FROM history")
+                    last_id = c.fetchone()[0] or 0
+                    session_id = last_id + 1
 
                     # Save to history
                     diseases = [l for l in summary.splitlines() if 'possible' in l.lower() or '可能' in l]
                     c.execute(
-                        "INSERT INTO history (doctor, patient, date, transcript, summary, diseases) VALUES (?,?,?,?,?,?)",
-                        (doc_name, pat_name, date_str, transcript, summary, ','.join(diseases))
+                        "INSERT INTO history (id, doctor, patient, date, transcript, summary, diseases) VALUES (?,?,?,?,?,?,?)",
+                        (session_id, doc_name, pat_name, date_str, transcript, summary, ','.join(diseases))
                     )
                     conn.commit()
 
                     # Generate PDF in memory
-                    pdf_buffer = generate_report(info, transcript, summary)
+                    pdf_buffer = generate_report(info, transcript, summary, session_id)
 
                     # Write to temporary file
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         tmp.write(pdf_buffer.read())
                         tmp_path = tmp.name
+                    
+                    # Markdown Summary: 显示 session 编号
+                    md_summary = f"**This conversation is Session #{session_id}**\n\n{summary}"
 
                     return (
                         transcript,
                         summary,
                         gr.update(value=tmp_path, visible=True),
-                        gr.update(value=summary, visible=True),   # 格式化 Markdown 展示
+                        gr.update(value=md_summary, visible=True),   # 格式化 Markdown 展示
                         gr.update(value=summary, visible=True)    # 文本框可编辑
+                        
                     )
 
 
