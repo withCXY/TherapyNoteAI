@@ -1,181 +1,200 @@
-import streamlit as st
-import sounddevice as sd
-import soundfile as sf
-import numpy as np
-import tempfile
 import os
-import time
+import sqlite3
 from datetime import datetime
-from pathlib import Path
-from dotenv import load_dotenv
-import openai
-from pydub import AudioSegment
-import pandas as pd
-import json
+from io import BytesIO
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from openai import OpenAI
+import gradio as gr
 
-# Load environment variables
-load_dotenv()
+# Ensure OpenAI API key is set
+# api_key = os.getenv("OPENAI_API_KEY")
+api_key = ''
+if not api_key:
+    raise ValueError("请设置环境变量 OPENAI_API_KEY 以使用本应用。")
+# Initialize OpenAI client
+client = OpenAI(api_key=api_key)
 
-# Configure OpenAI API
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Database setup
+DB_PATH = "assistant.db"
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+c = conn.cursor()
+# History table
+c.execute('''CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY,
+    doctor TEXT,
+    patient TEXT,
+    date TEXT,
+    transcript TEXT,
+    summary TEXT,
+    diseases TEXT
+)''')
+conn.commit()
 
-# Initialize session state variables
-if 'recordings' not in st.session_state:
-    st.session_state.recordings = []
-if 'transcripts' not in st.session_state:
-    st.session_state.transcripts = []
-if 'summaries' not in st.session_state:
-    st.session_state.summaries = []
-
-# Set page config
-st.set_page_config(
-    page_title="AI Therapy Notes Assistant",
-    page_icon="🎙️",
-    layout="wide"
-)
-
-# Application title and description
-st.title("AI Therapy Notes Assistant")
-st.markdown("""
-This application helps therapists manage their session notes through AI-powered
-transcription and summarization. Record your therapy sessions or upload audio files
-to get instant transcriptions and summaries.
-""")
-
-def record_audio(duration=300):
-    """Record audio for a specified duration."""
-    sample_rate = 44100
-    recording = sd.rec(int(duration * sample_rate),
-                      samplerate=sample_rate,
-                      channels=1,
-                      dtype=np.float32)
-    
-    # Create a progress bar
-    progress_bar = st.progress(0)
-    for i in range(duration):
-        if not st.session_state.get('recording', True):
-            sd.stop()
-            break
-        progress_bar.progress((i + 1) / duration)
-        st.session_state.current_time = i
-        time.sleep(1)
-    
-    sd.wait()
-    return recording, sample_rate
-
-def save_audio(recording, sample_rate):
-    """Save the recorded audio to a temporary file."""
-    temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-    sf.write(temp_audio.name, recording, sample_rate)
-    return temp_audio.name
-
-def transcribe_audio(audio_path):
-    """Transcribe audio using OpenAI's Whisper API."""
-    with open(audio_path, "rb") as audio_file:
-        transcript = openai.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file
-        )
-    return transcript.text
-
-def generate_summary(transcript):
-    """Generate a summary of the transcript using OpenAI's API."""
-    response = openai.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are a professional therapist's assistant. Summarize the therapy session transcript in a structured way, highlighting key points, observations, and potential action items."},
-            {"role": "user", "content": f"Please summarize this therapy session transcript:\n\n{transcript}"}
-        ]
-    )
-    return response.choices[0].message.content
-
-def save_session_data(audio_path, transcript, summary):
-    """Save session data to a JSON file."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_data = {
-        "timestamp": timestamp,
-        "audio_path": audio_path,
-        "transcript": transcript,
-        "summary": summary
+# Internationalization
+i18n = {
+    '中文': {
+        'new': '新对话', 'history': '历史记录',
+        'doctor': '医生姓名', 'patient': '病人姓名', 'date': '日期',
+        'audio': '录制/上传音频', 'file': '上传文件', 'submit': '提交',
+        'transcript': '转录文本', 'summary': '医用总结', 'download': '下载文档'
+    },
+    'English': {
+        'new': 'New Conversation', 'history': 'History',
+        'doctor': 'Doctor Name', 'patient': 'Patient Name', 'date': 'Date',
+        'audio': 'Record/Upload Audio', 'file': 'Upload File', 'submit': 'Submit',
+        'transcript': 'Transcript', 'summary': 'Medical Summary', 'download': 'Download PDF'
     }
-    
-    # Create data directory if it doesn't exist
-    data_dir = Path("session_data")
-    data_dir.mkdir(exist_ok=True)
-    
-    # Save to JSON file
-    with open(data_dir / f"session_{timestamp}.json", "w") as f:
-        json.dump(session_data, f)
-    
-    return session_data
+}
 
-# Main application layout
-tab1, tab2, tab3 = st.tabs(["Record Session", "Upload Audio", "View History"])
-
-with tab1:
-    st.header("Record New Session")
-    
-    if st.button("Start Recording"):
-        st.session_state.recording = True
-        recording, sample_rate = record_audio()
-        audio_path = save_audio(recording, sample_rate)
-        
-        with st.spinner("Transcribing audio..."):
-            transcript = transcribe_audio(audio_path)
-        
-        with st.spinner("Generating summary..."):
-            summary = generate_summary(transcript)
-        
-        session_data = save_session_data(audio_path, transcript, summary)
-        
-        st.success("Recording processed successfully!")
-        st.subheader("Transcript")
-        st.write(transcript)
-        st.subheader("Summary")
-        st.write(summary)
-
-with tab2:
-    st.header("Upload Audio File")
-    uploaded_file = st.file_uploader("Choose an audio file", type=['mp3', 'wav', 'm4a'])
-    
-    if uploaded_file is not None:
-        # Save uploaded file
-        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-        temp_audio.write(uploaded_file.read())
-        
-        with st.spinner("Transcribing audio..."):
-            transcript = transcribe_audio(temp_audio.name)
-        
-        with st.spinner("Generating summary..."):
-            summary = generate_summary(transcript)
-        
-        session_data = save_session_data(temp_audio.name, transcript, summary)
-        
-        st.success("Audio processed successfully!")
-        st.subheader("Transcript")
-        st.write(transcript)
-        st.subheader("Summary")
-        st.write(summary)
-
-with tab3:
-    st.header("Session History")
-    data_dir = Path("session_data")
-    if data_dir.exists():
-        session_files = list(data_dir.glob("*.json"))
-        if session_files:
-            sessions_data = []
-            for file in session_files:
-                with open(file, "r") as f:
-                    data = json.load(f)
-                    sessions_data.append({
-                        "Date": datetime.strptime(data["timestamp"], "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S"),
-                        "Transcript": data["transcript"][:100] + "...",
-                        "Summary": data["summary"][:100] + "..."
-                    })
-            
-            df = pd.DataFrame(sessions_data)
-            st.dataframe(df)
-        else:
-            st.info("No previous sessions found.")
+# Audio transcription (Whisper)
+def transcribe_audio(audio_path, file_obj):
+    if audio_path:
+        f = open(audio_path, 'rb')
+    elif file_obj:
+        f = open(file_obj.name, 'rb')
     else:
-        st.info("No previous sessions found.")
+        return ""
+    resp = client.audio.transcriptions.create(
+        file=f,
+        model="whisper-1"
+    )
+    f.close()
+    return resp.text
+
+# Summarize and extract possible diagnoses
+def summarize_and_extract(text, info):
+    prompt = (
+        f"Patient Info: {info}\n"
+        f"Transcript: {text}\n"
+        "Please summarize the above dialogue in a medical report style and list possible diagnoses."
+    )
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return resp.choices[0].message.content
+
+# Generate downloadable PDF report
+def generate_report(info, transcript, summary, knowledge=[]):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer)
+    styles = getSampleStyleSheet()
+    story = []
+    story.append(Paragraph(f"Patient Info: {info}", styles['Title']))
+    story.append(Spacer(1,12))
+    story.append(Paragraph("Transcript:", styles['Heading2']))
+    story.append(Paragraph(transcript.replace("\n","<br/>"), styles['BodyText']))
+    story.append(Spacer(1,12))
+    story.append(Paragraph("Summary & Possible Diagnoses:", styles['Heading2']))
+    story.append(Paragraph(summary.replace("\n","<br/>"), styles['BodyText']))
+    story.append(Spacer(1,12))
+    if knowledge:
+        story.append(Paragraph("Related Knowledge:", styles['Heading2']))
+        for q, a in knowledge:
+            story.append(Paragraph(f"Q: {q}", styles['BodyText']))
+            story.append(Paragraph(f"A: {a}", styles['BodyText']))
+            story.append(Spacer(1,8))
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+# Build Gradio UI
+def build_ui():
+    with gr.Blocks() as demo:
+        # Language selector
+        lang = gr.Radio(choices=['中文', 'English'], value='中文', label="Language")
+        # Tabs for new conversation and history
+        with gr.Tabs() as tabs:
+            with gr.Tab(i18n['中文']['new']) as new_tab:
+                doctor = gr.Textbox(label=i18n['中文']['doctor'])
+                patient = gr.Textbox(label=i18n['中文']['patient'])
+                date = gr.Textbox(label=i18n['中文']['date'], value=str(datetime.today().date()))
+                audio = gr.Audio(label=i18n['中文']['audio'], type='filepath')
+                file_obj = gr.File(label=i18n['中文']['file'])
+                btn = gr.Button(value=i18n['中文']['submit'])
+                transcript_out = gr.Textbox(label=i18n['中文']['transcript'])
+                summary_out = gr.Textbox(label=i18n['中文']['summary'])
+                pdf_file = gr.File(label=i18n['中文']['download'], visible=False)
+
+                import tempfile
+
+                def new_conversation(lang_sel, doc_name, pat_name, date_str, audio_path, file_upload):
+                    # Transcription and summary
+                    info = f"Doctor: {doc_name}; Patient: {pat_name}; Date: {date_str}"
+                    transcript = transcribe_audio(audio_path, file_upload)
+                    summary = summarize_and_extract(transcript, info)
+
+                    # Save to history
+                    diseases = [l for l in summary.splitlines() if 'possible' in l.lower() or '可能' in l]
+                    c.execute(
+                        "INSERT INTO history (doctor, patient, date, transcript, summary, diseases) VALUES (?,?,?,?,?,?)",
+                        (doc_name, pat_name, date_str, transcript, summary, ','.join(diseases))
+                    )
+                    conn.commit()
+
+                    # Generate PDF in memory
+                    pdf_buffer = generate_report(info, transcript, summary)
+
+                    # Write to temporary file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(pdf_buffer.read())
+                        tmp_path = tmp.name
+
+                    return transcript, summary, gr.update(value=tmp_path, visible=True)
+
+
+                btn.click(
+                    fn=new_conversation,
+                    inputs=[lang, doctor, patient, date, audio, file_obj],
+                    outputs=[transcript_out, summary_out, pdf_file]
+                )
+
+            with gr.Tab(i18n['中文']['history']) as history_tab:
+                hist_btn = gr.Button(value=i18n['中文']['history'])
+                history_table = gr.Dataframe(visible=False)
+
+                def view_history(lang_sel):
+                    labels = i18n[lang_sel]
+                    history_tab.update(label=labels['history'])
+                    hist_btn.update(value=labels['history'])
+                    c.execute("SELECT id, date, patient FROM history ORDER BY id DESC")
+                    rows = c.fetchall()
+                    return gr.Dataframe.update(
+                        value=[[rid, dt, pt] for rid, dt, pt in rows],
+                        headers=["ID", "Date", "Patient"],
+                        visible=True
+                    )
+
+                hist_btn.click(
+                    fn=view_history,
+                    inputs=[lang],
+                    outputs=[history_table]
+                )
+        # Language switch callback
+        def update_labels(lang_sel):
+            labels = i18n[lang_sel]
+            return [
+                gr.update(label=labels['new']),      # new_tab
+                gr.update(label=labels['history']),  # history_tab
+                gr.update(label=labels['doctor']),   # doctor
+                gr.update(label=labels['patient']),  # patient
+                gr.update(label=labels['date']),     # date
+                gr.update(label=labels['audio']),    # audio
+                gr.update(label=labels['file']),     # file_obj
+                gr.update(value=labels['submit']),   # btn
+                gr.update(label=labels['transcript']),# transcript_out
+                gr.update(label=labels['summary']),  # summary_out
+                gr.update(label=labels['download']), # pdf_file
+                gr.update(value=labels['history'])   # hist_btn
+            ]
+
+        lang.change(
+            fn=update_labels,
+            inputs=[lang],
+            outputs=[new_tab, history_tab, doctor, patient, date, audio, file_obj, btn, transcript_out, summary_out, pdf_file, hist_btn]
+        )
+        return demo
+
+app = build_ui()
+app.launch()
